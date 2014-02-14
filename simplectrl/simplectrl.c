@@ -44,7 +44,8 @@
 /*#define VID 0x0bb4*/
 /*#define PID 0x0f63*/
 static unsigned int VID = 0x0bb4;
-static unsigned int PID = 0x0f63;
+static unsigned int PID = 0x0dc4;
+static unsigned int interfaceId = 1;
 
 #define ACCESSORY_VID 0x18D1
 
@@ -95,12 +96,13 @@ int main (int argc, char *argv[]){
         sscanf(argv[1], "%4x", &VID);
         sscanf(argv[2], "%4x", &PID);
     }
+
     handle = NULL;
     int ret = init();
 	if (ret < 0) {
 	    if (ret == -2)
 	        goto main_phase;
-		return;
+		return 0;
     }
 	//doTransfer();
 	if(setupAccessory(
@@ -162,15 +164,89 @@ static int mainPhase() {
     putchar('\n');
 }
 
+static int getInterfaceNumber(struct libusb_device_handle * handle) {
+	struct libusb_device * dev;
+    struct libusb_device_descriptor deviceDesc;
+    struct libusb_config_descriptor * configDesc;
+    const struct libusb_interface *interface;
+    const char strAndroidAccessoryInterface[] = "Android Accessory Interface";
+    char interfaceString[255];
+    int foundConfig = 0;
+    int accessoryInterfaceNumber = -1;
+    int i, j, k;
+
+    fprintf(stdout, "find interface with %s:\n", strAndroidAccessoryInterface);
+
+	dev = libusb_get_device(handle);
+	if (dev == NULL) {
+	    fprintf(stdout, "Problem get libusb_device\n");
+	    return -1;
+    }
+	if (libusb_get_device_descriptor(dev, &deviceDesc) < 0) {
+	    fprintf(stdout, "Problem get libusb_device_descriptor\n");
+	    return -1;
+    }
+    fprintf(stdout, "bNumConfigurations %d\n", deviceDesc.bNumConfigurations);
+	for (i = 0; i < deviceDesc.bNumConfigurations; i++) {
+	    //printf("%d:\n", i);
+    	if (libusb_get_config_descriptor(dev, i, &configDesc) < 0) {
+    	    fprintf(stdout, "Problem get libusb_config_descriptor\n");
+    	    return -1;
+	    }
+	    for (j = 0; j < configDesc->bNumInterfaces; j++) {
+    	    //printf("%d:%d:\n", i, j);
+	        interface = &(configDesc->interface[j]);
+	        for (k = 0; k < interface->num_altsetting; k++) {
+        	    //printf("%d:%d:%d:\n", i, j, k);
+	            int len = libusb_get_string_descriptor_ascii(
+	                handle, interface->altsetting[k].iInterface,
+	                interfaceString, sizeof(interfaceString) - 1);
+                if (len < 0)
+                    return -1;
+                interfaceString[len] = 0;
+                if ((len == sizeof(strAndroidAccessoryInterface) - 1) &&
+                    !strcmp(strAndroidAccessoryInterface, interfaceString)) {
+                    foundConfig = 1;
+                    accessoryInterfaceNumber = interface->altsetting[k].bInterfaceNumber;
+                    goto found;
+                }
+	        }
+	    }
+    	libusb_free_config_descriptor(configDesc);
+	}
+found:
+	if (foundConfig == 0)
+	    return -1;
+	libusb_free_config_descriptor(configDesc);
+	return accessoryInterfaceNumber;
+}
+
 
 static int init() {
 	libusb_init(NULL);
-	if ((fprintf(stdout, "Try open device\n"), handle = libusb_open_device_with_vid_pid(NULL, VID, PID)) != NULL) {
-    	libusb_claim_interface(handle, 0);
+  	if ((fprintf(stdout, "Try open device\n"), handle = libusb_open_device_with_vid_pid(NULL, VID, PID)) != NULL) {
+        if (libusb_kernel_driver_active(handle, interfaceId))
+            if (libusb_detach_kernel_driver(handle, interfaceId) != 0) {
+            	fprintf(stdout, "Problem detach kernel\n");
+                return -1;
+            }
+        libusb_claim_interface(handle, interfaceId);
     	return 0;
 	} else if ((fprintf(stdout, "Try open accessory\n"), handle = libusb_open_device_with_vid_pid(NULL, ACCESSORY_VID, ACCESSORY_PID)) != NULL) {
+  	    int id = getInterfaceNumber(handle);
+  	    if (id < 0) {
+        	fprintf(stdout, "Problem search interface\n");
+  	        return -1;
+        }
+        interfaceId = id;
+        printf("interface number id is %d\n", interfaceId);
+        if (libusb_kernel_driver_active(handle, interfaceId))
+            if (libusb_detach_kernel_driver(handle, interfaceId) != 0) {
+            	fprintf(stdout, "Problem detach kernel\n");
+                return -1;
+            }
     	fprintf(stdout, "Already in accessory mode\n");
-	    libusb_claim_interface(handle, 0);
+	    libusb_claim_interface(handle, interfaceId);
 	    return -2;
 	}
 	fprintf(stdout, "Problem acquireing handle\n");
@@ -182,7 +258,7 @@ static int deInit(){
 	//if(ctrlTransfer != NULL)
 	//	libusb_free_transfer(ctrlTransfer);
 	if(handle != NULL)
-		libusb_release_interface (handle, 0);
+		libusb_release_interface(handle, interfaceId);
 	libusb_exit(NULL);
 	return 0;
 }
@@ -239,7 +315,7 @@ static int setupAccessory(
 	fprintf(stdout,"Attempted to put device into accessory mode\n", devVersion);
 
 	if(handle != NULL)
-		libusb_release_interface (handle, 0);
+		libusb_release_interface(handle, interfaceId);
 
 
 	for (;;) { //attempt to connect to new PID, if that doesn't work try ACCESSORY_PID_ADB
@@ -253,7 +329,13 @@ static int setupAccessory(
 		}
 		sleep(3);
 	}
-	libusb_claim_interface(handle, 0);
+    int id = getInterfaceNumber(handle);
+    if (id < 0) {
+    	fprintf(stdout, "Problem search interface\n");
+        return -1;
+    }
+    interfaceId = id;
+	libusb_claim_interface(handle, interfaceId);
 	fprintf(stdout, "Interface claimed, ready to transfer data\n");
 	return 0;
 }
